@@ -33,7 +33,13 @@ pub use config::Config;
 pub use database::{Database, Migration};
 pub use events::AuthifierEvent;
 
+#[cfg(all(feature = "async-std-runtime", feature = "tokio-runtime"))]
+compile_error!("features async-std-runtime and tokio-runtime cannot be enabled at the same time");
+
+#[cfg(feature = "async-std-runtime")]
 use async_std::channel::Sender;
+#[cfg(feature = "tokio-runtime")]
+use tokio::sync::mpsc::Sender;
 
 /// Authifier state
 #[derive(Default, Clone)]
