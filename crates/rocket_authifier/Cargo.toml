@@ -17,11 +17,12 @@ example = [
     "async-std",
     "mongodb",
 ]
+tokio-runtime = ["authifier/tokio-runtime"]
 
-default = []
+default = ["authifier/async-std-runtime"]
 
 [dependencies]
-authifier = { version = "1.0.15", path = "../authifier", features = [
+authifier = { version = "1.0.15", path = "../authifier", default-features = false, features = [
     "rocket_impl",
     "okapi_impl",
 ] }
