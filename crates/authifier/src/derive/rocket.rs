@@ -11,6 +11,7 @@ use crate::{
     models::{Account, MFATicket, Session, UnvalidatedTicket, ValidatedTicket},
     Authifier, Error,
 };
+use iso8601_timestamp::Timestamp;
 
 /// HTTP response builder for Error enum
 impl<'r> Responder<'r, 'static> for Error {
@@ -75,7 +76,17 @@ impl<'r> FromRequest<'r> for Session {
         match (request.rocket().state::<Authifier>(), header_session_token) {
             (Some(authifier), Some(token)) => {
                 if let Ok(session) = authifier.database.find_session_by_token(&token).await {
-                    if let Some(session) = session {
+                    if let Some(mut session) = session {
+                        let now = Timestamp::now_utc();
+                        let last_seen =
+                            Timestamp::parse(&session.last_seen).unwrap_or(Timestamp::UNIX_EPOCH);
+
+                        // Only update if it's more than 1 day old
+                        if now.duration_since(last_seen).whole_milliseconds() > 86400 * 1000 {
+                            session.last_seen = now.format().to_string();
+                            let _ = authifier.database.save_session(&session).await;
+                        }
+
                         Outcome::Success(session)
                     } else {
                         Outcome::Error((Status::Unauthorized, Error::InvalidSession))

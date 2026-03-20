@@ -24,7 +24,7 @@ pub struct Session {
     /// Display name
     pub name: String,
 
-    /// When the session was last logged in (iso8601 timestamp)
+    /// When the session was last seen (iso8601 timestamp)
     pub last_seen: String,
 
     /// What is the session origin?
