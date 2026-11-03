@@ -1,5 +1,5 @@
 use rocket::{
-    http::{ContentType, Status},
+    http::{ContentType, Header, Status},
     outcome::Outcome,
     request::{self, FromRequest},
     response::{self, Responder},
@@ -21,6 +21,7 @@ impl<'r> Responder<'r, 'static> for Error {
             Error::DatabaseError { .. } => Status::InternalServerError,
             Error::InternalError => Status::InternalServerError,
             Error::OperationFailed => Status::InternalServerError,
+            Error::ServiceUnavailable => Status::ServiceUnavailable,
             Error::RenderFail => Status::InternalServerError,
             Error::MissingHeaders => Status::BadRequest,
             Error::CaptchaFailed => Status::BadRequest,
@@ -50,14 +51,34 @@ impl<'r> Responder<'r, 'static> for Error {
         };
 
         // Serialize the error data structure into JSON.
+        let retry_after = matches!(self, Error::ServiceUnavailable);
         let string = json!(self).to_string();
 
         // Build and send the request.
-        Response::build()
+        let mut builder = Response::build();
+        builder
             .sized_body(string.len(), std::io::Cursor::new(string))
             .header(ContentType::new("application", "json"))
-            .status(status)
-            .ok()
+            .status(status);
+
+        if retry_after {
+            builder.header(Header::new("Retry-After", "1"));
+        }
+
+        builder.ok()
+    }
+}
+
+/// Map a database/guard error to an HTTP status without collapsing
+/// infrastructure failures into "invalid credential".
+fn status_for_error(error: &Error) -> Status {
+    match error {
+        Error::ServiceUnavailable => Status::ServiceUnavailable,
+        Error::InvalidSession | Error::InvalidToken | Error::InvalidCredentials => {
+            Status::Unauthorized
+        }
+        Error::UnknownUser => Status::NotFound,
+        _ => Status::InternalServerError,
     }
 }
 
@@ -75,24 +96,40 @@ impl<'r> FromRequest<'r> for Session {
 
         match (request.rocket().state::<Authifier>(), header_session_token) {
             (Some(authifier), Some(token)) => {
-                if let Ok(session) = authifier.database.find_session_by_token(&token).await {
-                    if let Some(mut session) = session {
+                match authifier.database.find_session_by_token(&token).await {
+                    Ok(Some(mut session)) => {
                         let now = Timestamp::now_utc();
                         let last_seen =
                             Timestamp::parse(&session.last_seen).unwrap_or(Timestamp::UNIX_EPOCH);
 
                         // Only update if it's more than 1 day old
                         if now.duration_since(last_seen).whole_milliseconds() > 86400 * 1000 {
-                            session.last_seen = now.format().to_string();
-                            let _ = authifier.database.save_session(&session).await;
+                            let last_seen = now.format().to_string();
+                            match authifier
+                                .database
+                                .update_session_last_seen(&session.id, &last_seen)
+                                .await
+                            {
+                                Ok(()) => session.last_seen = last_seen,
+                                Err(Error::InvalidSession) => {
+                                    return Outcome::Error((
+                                        Status::Unauthorized,
+                                        Error::InvalidSession,
+                                    ));
+                                }
+                                Err(error) => {
+                                    return Outcome::Error((status_for_error(&error), error));
+                                }
+                            }
                         }
 
                         Outcome::Success(session)
-                    } else {
+                    }
+                    Ok(None) => Outcome::Error((Status::Unauthorized, Error::InvalidSession)),
+                    Err(Error::UnknownUser) => {
                         Outcome::Error((Status::Unauthorized, Error::InvalidSession))
                     }
-                } else {
-                    Outcome::Error((Status::Unauthorized, Error::InvalidSession))
+                    Err(error) => Outcome::Error((status_for_error(&error), error)),
                 }
             }
             (_, _) => Outcome::Error((Status::Unauthorized, Error::MissingHeaders)),
@@ -234,5 +271,112 @@ impl<'r> FromRequest<'r> for ShieldValidationInput {
         } else {
             Outcome::Error((Status::InternalServerError, Error::InternalError))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rocket::http::Header;
+    use rocket::local::{asynchronous::Client as AsyncClient, blocking::Client};
+    use rocket::{http::Method, route::BoxFuture, Route};
+    fn unavailable<'r>(request: &'r Request<'_>, _data: rocket::Data<'r>) -> BoxFuture<'r> {
+        let outcome = match Error::ServiceUnavailable.respond_to(request) {
+            Ok(response) => Outcome::Success(response),
+            Err(status) => Outcome::Error(status),
+        };
+
+        Box::pin(async move { outcome })
+    }
+
+    fn guarded<'r>(request: &'r Request<'_>, _data: rocket::Data<'r>) -> BoxFuture<'r> {
+        Box::pin(async move {
+            match request.guard::<Session>().await {
+                Outcome::Success(_) => match "ok".respond_to(request) {
+                    Ok(response) => Outcome::Success(response),
+                    Err(status) => Outcome::Error(status),
+                },
+                Outcome::Error((status, _error)) => Outcome::Error(status),
+                Outcome::Forward(_) => Outcome::Error(Status::Unauthorized),
+            }
+        })
+    }
+
+    #[test]
+    fn guard_error_mapping_distinguishes_infrastructure_failures() {
+        assert_eq!(
+            status_for_error(&Error::ServiceUnavailable),
+            Status::ServiceUnavailable
+        );
+        assert_eq!(
+            status_for_error(&Error::InvalidSession),
+            Status::Unauthorized
+        );
+        assert_eq!(
+            status_for_error(&Error::DatabaseError {
+                operation: "find",
+                with: "session",
+            }),
+            Status::InternalServerError
+        );
+    }
+
+    #[test]
+    fn service_unavailable_response_has_retry_after() {
+        let client = Client::tracked(
+            rocket::build().mount("/", vec![Route::new(Method::Get, "/fail", unavailable)]),
+        )
+        .unwrap();
+
+        let response = client.get("/fail").dispatch();
+        assert_eq!(response.status(), Status::ServiceUnavailable);
+        assert_eq!(response.headers().get_one("Retry-After"), Some("1"));
+    }
+
+    #[test]
+    fn session_guard_without_token_returns_401() {
+        let client = Client::tracked(
+            rocket::build()
+                .manage(Authifier::default())
+                .mount("/", vec![Route::new(Method::Get, "/guarded", guarded)]),
+        )
+        .unwrap();
+
+        let response = client.get("/guarded").dispatch();
+        assert_eq!(response.status(), Status::Unauthorized);
+    }
+
+    #[cfg(feature = "database-mongodb")]
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
+    async fn session_guard_database_error_returns_500() {
+        let mut options = mongodb::options::ClientOptions::parse("mongodb://127.0.0.1:1")
+            .await
+            .unwrap();
+        options.server_selection_timeout = Some(std::time::Duration::from_millis(100));
+        let mongo = mongodb::Client::with_options(options).unwrap();
+
+        let authifier = Authifier {
+            database: crate::database::Database::MongoDb(crate::database::MongoDb(
+                mongo.database("guard_error_test"),
+            )),
+            config: Default::default(),
+            event_channel: None,
+        };
+
+        let client = AsyncClient::tracked(
+            rocket::build()
+                .manage(authifier)
+                .mount("/", vec![Route::new(Method::Get, "/guarded", guarded)]),
+        )
+        .await
+        .unwrap();
+
+        let response = client
+            .get("/guarded")
+            .header(Header::new("x-session-token", "token"))
+            .dispatch()
+            .await;
+        assert_eq!(response.status(), Status::InternalServerError);
     }
 }

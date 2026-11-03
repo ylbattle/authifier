@@ -1,5 +1,5 @@
 use crate::{
-    models::{Account, Invite, MFATicket, Session},
+    models::{Account, Invite, MFATicket, Session, WebPushSubscription},
     Result, Success,
 };
 
@@ -52,8 +52,29 @@ pub trait AbstractDatabase: std::marker::Sync {
     // Save account
     async fn save_account(&self, account: &Account) -> Success;
 
-    /// Save session
-    async fn save_session(&self, session: &Session) -> Success;
+    /// Atomically get or create a session for `(user_id, origin)`.
+    ///
+    /// Returns `(session, created)`, where `created` is true only when this
+    /// call inserted the record. Callers must only publish `CreateSession`
+    /// when `created` is true.
+    async fn get_or_create_session(&self, session: &Session) -> Result<(Session, bool)>;
+
+    /// Insert a brand new session. Never upserts.
+    async fn insert_session(&self, session: &Session) -> Success;
+
+    /// Rename a session. Returns `UnknownUser` if the target does not exist.
+    async fn update_session_name(&self, id: &str, name: &str) -> Success;
+
+    /// Refresh `last_seen`. Returns `InvalidSession` if the record is gone.
+    async fn update_session_last_seen(&self, id: &str, last_seen: &str) -> Success;
+
+    /// Set (`Some`) or remove (`None`) a web push subscription.
+    /// Returns `InvalidSession` if the record is gone.
+    async fn set_session_subscription(
+        &self,
+        id: &str,
+        subscription: Option<&WebPushSubscription>,
+    ) -> Success;
 
     /// Save invite
     async fn save_invite(&self, invite: &Invite) -> Success;
