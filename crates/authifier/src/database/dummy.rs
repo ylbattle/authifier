@@ -156,6 +156,19 @@ impl AbstractDatabase for DummyDb {
             .cloned())
     }
 
+    /// Insert a brand new account. Never upserts.
+    async fn insert_account(&self, account: &Account) -> Success {
+        let mut accounts = self.accounts.lock().await;
+        if accounts.contains_key(&account.id) {
+            return Err(Error::DatabaseError {
+                operation: "insert_one",
+                with: "account",
+            });
+        }
+        accounts.insert(account.id.clone(), account.clone());
+        Ok(())
+    }
+
     // Save account
     async fn save_account(&self, account: &Account) -> Success {
         let mut accounts = self.accounts.lock().await;
@@ -319,6 +332,32 @@ mod tests {
             origin: Some(origin.to_string()),
             subscription: None,
         }
+    }
+
+    fn account(id: &str) -> Account {
+        Account {
+            id: id.to_string(),
+            email: "a@example.com".to_string(),
+            email_normalised: "a@example.com".to_string(),
+            password: String::new(),
+            disabled: false,
+            verification: EmailVerification::Verified,
+            password_reset: None,
+            deletion: None,
+            lockout: None,
+            mfa: Default::default(),
+        }
+    }
+
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
+    async fn insert_account_is_create_only() {
+        let db = DummyDb::default();
+        db.insert_account(&account("acct1")).await.unwrap();
+        assert!(db.insert_account(&account("acct1")).await.is_err());
+
+        let found = db.find_account("acct1").await.unwrap();
+        assert_eq!(found.email, "a@example.com");
     }
 
     #[cfg_attr(feature = "async-std-runtime", async_std::test)]

@@ -52,6 +52,9 @@ pub trait AbstractDatabase: std::marker::Sync {
     // Save account
     async fn save_account(&self, account: &Account) -> Success;
 
+    /// Insert a brand new account. Never upserts; a duplicate id is an error.
+    async fn insert_account(&self, account: &Account) -> Success;
+
     /// Atomically get or create a session for `(user_id, origin)`.
     ///
     /// Returns `(session, created)`, where `created` is true only when this
