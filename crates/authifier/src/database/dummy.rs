@@ -1,5 +1,5 @@
 use crate::{
-    models::{Account, DeletionInfo, EmailVerification, Invite, MFATicket, Session},
+    models::{Account, DeletionInfo, EmailVerification, Invite, MFATicket, Session, WebPushSubscription},
     Error, Result, Success,
 };
 
@@ -163,11 +163,93 @@ impl AbstractDatabase for DummyDb {
         Ok(())
     }
 
-    /// Save session
-    async fn save_session(&self, session: &Session) -> Success {
+    /// Atomically get or create a session by `(user_id, origin)`.
+    async fn get_or_create_session(&self, session: &Session) -> Result<(Session, bool)> {
+        let origin = session.origin.as_deref().ok_or(Error::IncorrectData {
+            with: "session.origin",
+        })?;
         let mut sessions = self.sessions.lock().await;
-        sessions.insert(session.id.to_string(), session.clone());
+
+        if let Some(existing) = sessions.values().find(|existing| {
+            existing.user_id == session.user_id
+                && existing.origin.as_deref() == Some(origin)
+        }) {
+            return Ok((existing.clone(), false));
+        }
+
+        sessions.insert(session.id.clone(), session.clone());
+        Ok((session.clone(), true))
+    }
+
+    /// Insert a session without upserting.
+    async fn insert_session(&self, session: &Session) -> Success {
+        let mut sessions = self.sessions.lock().await;
+        if sessions.contains_key(&session.id) {
+            return Err(Error::DatabaseError {
+                operation: "insert_session",
+                with: "session",
+            });
+        }
+        sessions.insert(session.id.clone(), session.clone());
         Ok(())
+    }
+
+    /// Rename a session.
+    async fn update_session_name(&self, id: &str, name: &str) -> Success {
+        #[cfg(any(test, feature = "test-support"))]
+        if crate::test_support::take_update_name_error() {
+            return Err(Error::UnknownUser);
+        }
+
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get_mut(id) {
+            Some(session) => {
+                session.name = name.to_string();
+                Ok(())
+            }
+            None => Err(Error::UnknownUser),
+        }
+    }
+
+    /// Refresh `last_seen`.
+    async fn update_session_last_seen(&self, id: &str, last_seen: &str) -> Success {
+        #[cfg(any(test, feature = "test-support"))]
+        if crate::test_support::take_update_session_error() {
+            return Err(Error::DatabaseError {
+                operation: "update_session_last_seen",
+                with: "session",
+            });
+        }
+
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get_mut(id) {
+            Some(session) => {
+                session.last_seen = last_seen.to_string();
+                Ok(())
+            }
+            None => Err(Error::InvalidSession),
+        }
+    }
+
+    /// Set or remove the push subscription.
+    async fn set_session_subscription(
+        &self,
+        id: &str,
+        subscription: Option<&WebPushSubscription>,
+    ) -> Success {
+        #[cfg(any(test, feature = "test-support"))]
+        if crate::test_support::take_set_subscription_error() {
+            return Err(Error::InvalidSession);
+        }
+
+        let mut sessions = self.sessions.lock().await;
+        match sessions.get_mut(id) {
+            Some(session) => {
+                session.subscription = subscription.cloned();
+                Ok(())
+            }
+            None => Err(Error::InvalidSession),
+        }
     }
 
     /// Save invite
@@ -220,5 +302,72 @@ impl AbstractDatabase for DummyDb {
         } else {
             Err(Error::InvalidToken)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn session(id: &str, token: &str, origin: &str) -> Session {
+        Session {
+            id: id.to_string(),
+            user_id: "u1".to_string(),
+            token: token.to_string(),
+            name: "Unknown".to_string(),
+            last_seen: "2026-11-03T00:00:00.000Z".to_string(),
+            origin: Some(origin.to_string()),
+            subscription: None,
+        }
+    }
+
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
+    async fn get_or_create_session_is_idempotent() {
+        let db = DummyDb::default();
+
+        let (created_session, created) = db
+            .get_or_create_session(&session("01A", "t1", "skyauth:v1:abc"))
+            .await
+            .unwrap();
+        assert!(created);
+        assert_eq!(created_session.id, "01A");
+
+        let (existing, created) = db
+            .get_or_create_session(&session("01B", "t2", "skyauth:v1:abc"))
+            .await
+            .unwrap();
+        assert!(!created);
+        assert_eq!(existing.id, "01A");
+        assert_eq!(existing.token, "t1");
+
+        let (_, created) = db
+            .get_or_create_session(&session("01C", "t3", "skyauth:v1:def"))
+            .await
+            .unwrap();
+        assert!(created);
+
+        let mut no_origin = session("01D", "t4", "skyauth:v1:ghi");
+        no_origin.origin = None;
+        assert!(db.get_or_create_session(&no_origin).await.is_err());
+    }
+
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
+    async fn update_missing_session_errors() {
+        let db = DummyDb::default();
+        assert!(matches!(
+            db.update_session_last_seen("missing", "2026-11-03T00:00:00.000Z")
+                .await,
+            Err(Error::InvalidSession)
+        ));
+        assert!(matches!(
+            db.set_session_subscription("missing", None).await,
+            Err(Error::InvalidSession)
+        ));
+        assert!(matches!(
+            db.update_session_name("missing", "name").await,
+            Err(Error::UnknownUser)
+        ));
     }
 }

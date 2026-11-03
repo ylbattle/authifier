@@ -33,10 +33,12 @@ pub async fn edit(
     }
 
     // Rename the session
-    session.name = data.into_inner().friendly_name;
-
-    // Save session
-    authifier.database.save_session(&session).await?;
+    let name = data.into_inner().friendly_name;
+    authifier
+        .database
+        .update_session_name(&session.id, &name)
+        .await?;
+    session.name = name;
 
     Ok(Json(session.into()))
 }
@@ -73,5 +75,32 @@ mod tests {
         let result = res.into_string().await.unwrap();
         let session = serde_json::from_str::<SessionInfo>(&result).unwrap();
         assert_eq!(session.name, "test name");
+    }
+
+    #[async_std::test]
+    async fn target_disappears_after_guard_returns_404() {
+        use rocket::http::Header;
+
+        let (authifier, session, _, _) = for_test_authenticated("edit::target-gone").await;
+        let client =
+            bootstrap_rocket_with_auth(authifier, routes![crate::routes::session::edit::edit])
+                .await;
+
+        authifier::test_support::force_update_name_error();
+
+        let res = client
+            .patch(format!("/{}", session.id))
+            .header(ContentType::JSON)
+            .header(Header::new("X-Session-Token", session.token))
+            .body(
+                json!({
+                    "friendly_name": "test name"
+                })
+                .to_string(),
+            )
+            .dispatch()
+            .await;
+
+        assert_eq!(res.status(), Status::NotFound);
     }
 }

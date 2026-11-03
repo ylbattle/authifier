@@ -96,7 +96,7 @@ impl Account {
         };
 
         // Save to database
-        authifier.database.save_session(&session).await?;
+        authifier.database.insert_session(&session).await?;
 
         // Create and push event
         authifier
@@ -106,6 +106,42 @@ impl Account {
             .await;
 
         Ok(session)
+    }
+
+    /// Get or create a session for `(user id, origin)`.
+    ///
+    /// Only the request that actually inserts the record publishes
+    /// `CreateSession`; concurrent/repeated calls receive the existing one.
+    pub async fn get_or_create_session(
+        &self,
+        authifier: &Authifier,
+        name: String,
+        origin: String,
+    ) -> Result<(Session, bool)> {
+        let session = Session {
+            id: ulid::Ulid::new().to_string(),
+            token: nanoid!(64),
+
+            user_id: self.id.clone(),
+            name,
+
+            last_seen: Timestamp::now_utc().format().to_string(),
+
+            origin: Some(origin),
+            subscription: None,
+        };
+
+        let (session, created) = authifier.database.get_or_create_session(&session).await?;
+
+        if created {
+            authifier
+                .publish_event(AuthifierEvent::CreateSession {
+                    session: session.clone(),
+                })
+                .await;
+        }
+
+        Ok((session, created))
     }
 
     /// Send account verification email
@@ -384,5 +420,88 @@ impl Account {
         });
 
         self.disable(authifier).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::Database;
+    use crate::models::MultiFactorAuthentication;
+
+    fn account() -> Account {
+        Account {
+            id: "a1".to_string(),
+            email: "a@example.com".to_string(),
+            email_normalised: "a@example.com".to_string(),
+            password: String::new(),
+            disabled: false,
+            verification: EmailVerification::Verified,
+            password_reset: None,
+            deletion: None,
+            lockout: None,
+            mfa: MultiFactorAuthentication::default(),
+        }
+    }
+
+    #[cfg(feature = "async-std-runtime")]
+    fn channel() -> (
+        async_std::channel::Sender<AuthifierEvent>,
+        async_std::channel::Receiver<AuthifierEvent>,
+    ) {
+        async_std::channel::bounded(10)
+    }
+
+    #[cfg(feature = "tokio-runtime")]
+    fn channel() -> (
+        tokio::sync::mpsc::Sender<AuthifierEvent>,
+        tokio::sync::mpsc::Receiver<AuthifierEvent>,
+    ) {
+        tokio::sync::mpsc::channel(10)
+    }
+
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
+    async fn only_the_creator_publishes_a_session_event() {
+        #[allow(unused_mut)]
+        let (sender, mut receiver) = channel();
+        let authifier = Authifier {
+            database: Database::default(),
+            config: Default::default(),
+            event_channel: Some(sender),
+        };
+        let account = account();
+        let origin = "skyauth:v1:event-test".to_string();
+
+        let (_, created) = account
+            .get_or_create_session(&authifier, "first".to_string(), origin.clone())
+            .await
+            .unwrap();
+        assert!(created);
+
+        let (_, created) = account
+            .get_or_create_session(&authifier, "second".to_string(), origin)
+            .await
+            .unwrap();
+        assert!(!created, "a reused session must not publish an event");
+
+        // Exactly one CreateSession event: the reused call publishes nothing.
+        #[cfg(feature = "async-std-runtime")]
+        {
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(AuthifierEvent::CreateSession { .. })
+            ));
+            assert!(receiver.try_recv().is_err());
+        }
+
+        #[cfg(feature = "tokio-runtime")]
+        {
+            assert!(matches!(
+                receiver.try_recv(),
+                Ok(AuthifierEvent::CreateSession { .. })
+            ));
+            assert!(receiver.try_recv().is_err());
+        }
     }
 }

@@ -1,11 +1,6 @@
 use crate::{models::Session, Authifier, AuthifierEvent, Success};
 
 impl Session {
-    /// Save model
-    pub async fn save(&self, authifier: &Authifier) -> Success {
-        authifier.database.save_session(self).await
-    }
-
     /// Delete session
     pub async fn delete(self, authifier: &Authifier) -> Success {
         // Delete from database

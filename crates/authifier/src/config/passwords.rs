@@ -99,13 +99,15 @@ mod tests {
 
     use std::collections::HashSet;
 
-    #[async_std::test]
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
     async fn it_accepts_any_passwords() {
         let passwords = PasswordScanning::None;
         assert_eq!(passwords.assert_safe("example123").await, Ok(()));
     }
 
-    #[async_std::test]
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
     async fn it_accepts_some_passwords() {
         let passwords = PasswordScanning::Custom {
             passwords: HashSet::from(["abc".to_string()]),
@@ -114,7 +116,8 @@ mod tests {
         assert_eq!(passwords.assert_safe("example123").await, Ok(()));
     }
 
-    #[async_std::test]
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
     async fn it_rejects_some_passwords() {
         let passwords = PasswordScanning::Custom {
             passwords: HashSet::from(["example123".to_string()]),

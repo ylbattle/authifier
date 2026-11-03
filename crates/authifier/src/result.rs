@@ -11,6 +11,8 @@ pub enum Error {
     },
     InternalError,
     OperationFailed,
+    /// Transient infrastructure failure; the client may retry.
+    ServiceUnavailable,
 
     RenderFail,
     MissingHeaders,

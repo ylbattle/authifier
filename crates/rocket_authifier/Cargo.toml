@@ -10,7 +10,7 @@ repository = "https://github.com/authifier/authifier"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-test = ["reqwest", "regex", "serde_json", "chrono", "base32", "example"]
+test = ["reqwest", "regex", "serde_json", "chrono", "base32", "example", "authifier/test-support"]
 example = [
     "authifier/async-std-runtime",
     "authifier/database-mongodb",

@@ -79,7 +79,8 @@ impl Shield {
 mod tests {
     use super::Shield;
 
-    #[async_std::test]
+    #[cfg_attr(feature = "async-std-runtime", async_std::test)]
+    #[cfg_attr(feature = "tokio-runtime", tokio::test)]
     async fn it_accepts_if_no_shield_service() {
         let shield = Shield::Disabled;
         assert_eq!(shield.validate(Default::default()).await, Ok(()));
