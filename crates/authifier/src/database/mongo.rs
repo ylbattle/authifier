@@ -585,6 +585,18 @@ impl AbstractDatabase for MongoDb {
         }
     }
 
+    /// Insert a brand new account. Never upserts.
+    async fn insert_account(&self, account: &Account) -> Success {
+        self.collection::<Account>("accounts")
+            .insert_one(account)
+            .await
+            .map_err(|_| Error::DatabaseError {
+                operation: "insert_one",
+                with: "account",
+            })
+            .map(|_| ())
+    }
+
     // Save account
     async fn save_account(&self, account: &Account) -> Success {
         self.collection::<Account>("accounts")
